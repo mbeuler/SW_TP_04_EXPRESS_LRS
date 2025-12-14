@@ -1,6 +1,8 @@
 import time
 import serial
 
+# URL:  https://thedevanaproject.com/2025/01/20/how-to-decode-rc-commands-from-an-elrs-receiver-module-with-a-raspberry-pi/
+
 # CRSF Broadcast Frame (sync bytes <= 0x27 )
 # Offset |        Usage        | CRC | Comment
 #   0    |      sync byte      | No  | uint8, e.g. 0xEE -> to TX module, 0xC8 -> to FC, 0xEC -> FC to RX
