@@ -113,6 +113,10 @@ int main(void)
 {
 
   /* USER CODE BEGIN 1 */
+	const uint8_t example[] = {0xAB, 0xCD, 0xEF};
+
+	uint8_t crc_bitwise = 0x00;
+	uint8_t crc_table   = 0x00;
 
   /* USER CODE END 1 */
 
@@ -146,6 +150,9 @@ int main(void)
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
+  crc_bitwise = crc8_dvb_s2_bitwise(example, sizeof(example)); // Expected value: 0x8C
+  crc_table   = crc8_dvb_s2_table(example, sizeof(example));   // Expected value: 0x8C
+
   while (1)
   {
     /* USER CODE END WHILE */
