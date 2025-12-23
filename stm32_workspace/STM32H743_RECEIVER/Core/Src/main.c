@@ -17,12 +17,13 @@
   */
 /* USER CODE END Header */
 /* Includes ------------------------------------------------------------------*/
-#include "main.h"
 #include "usart.h"
+#include "main.h"
 #include "gpio.h"
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
+#include "uart_ring.h"
 
 /* USER CODE END Includes */
 
@@ -47,7 +48,7 @@
 /* Private variables ---------------------------------------------------------*/
 
 /* USER CODE BEGIN PV */
-//extern UART_HandleTypeDef huart3;
+volatile uint8_t led_enabled = 0;
 
 // Einzelbyte-Puffer fuer Interrupt-Empfang (USART3)
 static uint8_t uart3_rx_byte = 0;
@@ -293,22 +294,6 @@ int format_channels(char *msg, int n)
 	return pos;
 }
 
-
-void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart) {
-	if (huart == &huart3) {
-		crsf_consume_byte(uart3_rx_byte);
-
-		/* If we set a breakpoint in the callback function, we must clear ORE bit */
-		if (__HAL_UART_GET_FLAG(&huart3, UART_FLAG_ORE)) {
-			__HAL_UART_CLEAR_OREFLAG(&huart3);
-		}
-
-		// Naechsten Byte-Empfang sofort wieder starten
-		HAL_UART_Receive_IT(&huart3, &uart3_rx_byte, 1);
-	}
-}
-
-
 /* USER CODE END 0 */
 
 /**
@@ -319,6 +304,7 @@ int main(void)
 {
 
   /* USER CODE BEGIN 1 */
+	uint8_t b;
 	uint32_t last_print_ms = 0;
 
 	char msg[64];
@@ -349,25 +335,15 @@ int main(void)
   MX_USART2_UART_Init();
   MX_USART3_UART_Init();
   /* USER CODE BEGIN 2 */
-  __disable_irq();  /* Disable global interrupts */
-
-  /* CMSIS */
-  SysTick->CTRL |= SysTick_CTRL_CLKSOURCE_Msk;  // HCLK as clock source
-  SysTick_Config(SystemCoreClock/1000); /* Start SysTick_Handler */
+  UART_Ring_Init(&huart3);
+  __HAL_UART_ENABLE_IT(&huart3, UART_IT_RXNE);  // RX interrupt aktivieren
 
   /* Wait until key K1 is pressed (PC13, high active, pull-down) */
-  while(!HAL_GPIO_ReadPin(GPIOC, GPIO_PIN_13));
-
-  __enable_irq();  /* Enable global interrupts */
-
-  /* Clear ORE bit in USART3 (overrun error bit) */
-  if (__HAL_UART_GET_FLAG(&huart3, UART_FLAG_ORE)) {
-      __HAL_UART_CLEAR_OREFLAG(&huart3);
+  while(!HAL_GPIO_ReadPin(GPIOC, GPIO_PIN_13)) {
+	  HAL_Delay(1); // Short delay
   }
 
-  if (HAL_UART_Receive_IT(&huart3, &uart3_rx_byte, 1) != HAL_OK) {
-	  Error_Handler();
-  }
+  led_enabled = 1;
 
   /* USER CODE END 2 */
 
@@ -376,6 +352,10 @@ int main(void)
 
   while (1)
   {
+	  while (UART_Ring_GetByte(&b)) {
+		  crsf_consume_byte(b);
+	  }
+
 	  // Alle 100ms Kanalwerte in us ausgeben
 	  if (HAL_GetTick() - last_print_ms >= 100) {
 		  last_print_ms = HAL_GetTick();

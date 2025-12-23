@@ -22,6 +22,7 @@
 #include "stm32h7xx_it.h"
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
+#include "uart_ring.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -41,6 +42,7 @@
 
 /* Private variables ---------------------------------------------------------*/
 /* USER CODE BEGIN PV */
+extern uint8_t led_enabled;
 volatile uint32_t _Ticks = 0;        // Counts 1ms ticks during run-time
 
 /* USER CODE END PV */
@@ -187,7 +189,9 @@ void SysTick_Handler(void)
 	_Ticks++; // Counts ticks during run-time
 
 	/* Toggle PE3 (user LED) every 500ms */
-	if (_Ticks % 500 == 0) {HAL_GPIO_TogglePin(GPIOE, GPIO_PIN_3);}
+	if (led_enabled) {
+		if (_Ticks % 500 == 0) HAL_GPIO_TogglePin(GPIOE, GPIO_PIN_3);
+	}
 
   /* USER CODE END SysTick_IRQn 0 */
   HAL_IncTick();
@@ -213,6 +217,12 @@ void USART3_IRQHandler(void)
   /* USER CODE END USART3_IRQn 0 */
   HAL_UART_IRQHandler(&huart3);
   /* USER CODE BEGIN USART3_IRQn 1 */
+  // Wenn ORE gesetzt ist, löschen
+  if (__HAL_UART_GET_FLAG(&huart3, UART_FLAG_ORE)) {
+	  __HAL_UART_CLEAR_OREFLAG(&huart3);
+  }
+
+  UART_Ring_IRQ_Handler(&huart3); // wir lesen das Byte
 
   /* USER CODE END USART3_IRQn 1 */
 }
