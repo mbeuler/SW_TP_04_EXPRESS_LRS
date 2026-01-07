@@ -2,7 +2,7 @@
  * usart_ring.h
  *
  *  Created on: 23.12.2025
- *      Author: Windows
+ *      Author: mbeuler
  */
 
 #ifndef INC_UART_RING_H_

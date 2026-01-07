@@ -2,7 +2,7 @@
  * uart_ring.c
  *
  *  Created on: 23.12.2025
- *      Author: Windows
+ *      Author: mbeuler
  */
 
 #include "uart_ring.h"
