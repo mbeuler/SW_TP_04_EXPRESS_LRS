@@ -23,6 +23,7 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
+#include "crsf.h"
 
 /* USER CODE END Includes */
 
@@ -44,6 +45,10 @@
 /* Private variables ---------------------------------------------------------*/
 
 /* USER CODE BEGIN PV */
+uint16_t rcChannels[16] = {
+    1000,1100,1200,1300,1400,1500,1600,1700,
+    1800,1900,2000,1111,1122,1133,1144,1155
+};
 
 /* USER CODE END PV */
 
@@ -90,6 +95,12 @@ int main(void)
   MX_USART2_UART_Init();
   MX_USART3_UART_Init();
   /* USER CODE BEGIN 2 */
+  int direction = +10;        // +10 = hochzählen, -10 = runterzählen
+  uint32_t lastUpdate = 0;    // für 1-Sekunden-Intervall
+  uint32_t lastFrame = 0;     // für 250 Hz
+
+  uint8_t payload[22];
+  uint8_t frame[32];
 
   /* USER CODE END 2 */
 
@@ -97,6 +108,40 @@ int main(void)
   /* USER CODE BEGIN WHILE */
   while (1)
   {
+	  uint32_t now = HAL_GetTick();
+
+	  // --- 1) Kanal 1 jede Sekunde ändern ---
+	  if (now - lastUpdate >= 1000)
+	  {
+		  lastUpdate = now;
+
+	      rcChannels[0] += direction;
+
+	      if (rcChannels[0] >= 1500)
+	      {
+	          rcChannels[0] = 1500;
+	          direction = -10;
+	      }
+	      else if (rcChannels[0] <= 1000)
+	      {
+	          rcChannels[0] = 1000;
+	          direction = +10;
+	      }
+	  }
+
+	  // --- 2) CRSF-Frame alle 4 ms senden (250 Hz) ---
+	  if (now - lastFrame >= 4)
+	  {
+	      lastFrame = now;
+
+	      //uint8_t payload[22];
+	      //uint8_t frame[32];
+
+	      CRSF_PackChannels(rcChannels, payload);
+	      uint16_t frameLen = CRSF_CreateFrame(frame, CRSF_TYPE_RC_CHANNELS, payload, 22);
+
+	      HAL_UART_Transmit(&huart3, frame, frameLen, 2);
+	  }
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
