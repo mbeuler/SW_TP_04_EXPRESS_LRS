@@ -140,6 +140,9 @@ int main(void)
 	      CRSF_PackChannels(rcChannels, payload);
 	      uint16_t frameLen = CRSF_CreateFrame(frame, CRSF_TYPE_RC_CHANNELS, payload, 22);
 
+	      // Enable TX (Half-Duplex Mode)
+	      //HAL_HalfDuplex_EnableTransmitter(&huart3);
+
 	      HAL_UART_Transmit(&huart3, frame, frameLen, 2);
 	  }
     /* USER CODE END WHILE */
