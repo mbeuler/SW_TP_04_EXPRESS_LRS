@@ -7,21 +7,6 @@
 
 #include "crsf.h"
 
-/* ===== Global CRSF data ===== */
-volatile uint16_t rc_raw[16] = {0};
-volatile uint16_t rc_us[16]  = {
-    1500,1500,1500,1500,1500,1500,1500,1500,
-    1500,1500,1500,1500,1500,1500,1500,1500
-};
-
-/* ===== Static parser variables ===== */
-static uint8_t  crsf_frame[CRSF_MAX_FRAME_LEN];
-static size_t   crsf_idx = 0;
-static uint8_t  crsf_expected_len = 0;
-
-typedef enum { S_WAIT_DEST, S_WAIT_LEN, S_READ_BODY } crsf_state_t;
-static crsf_state_t crsf_state = S_WAIT_DEST;
-
 // Lookup Table:  https://github.com/tbs-fpv/tbs-crsf-spec/blob/main/crsf.md#crc
 //                https://www.sunshine2k.de/coding/javascript/crc/crc_js.html  -->  CRC8_DVB_S2
 static const uint8_t CRC8_DVB_S2_TABLE[256] = {
@@ -43,8 +28,6 @@ static const uint8_t CRC8_DVB_S2_TABLE[256] = {
 	0x84, 0x51, 0xFB, 0x2E, 0x7A, 0xAF, 0x05, 0xD0, 0xAD, 0x78, 0xD2, 0x07, 0x53, 0x86, 0x2C, 0xF9
 };
 
-
-/* ===== Helper functions ===== */
 static inline uint8_t crc8_dvb_s2_bitwise(const uint8_t *data, size_t len)
 {
     uint8_t crc  = 0x00;        // Initial value
@@ -60,11 +43,10 @@ static inline uint8_t crc8_dvb_s2_bitwise(const uint8_t *data, size_t len)
             }
         }
     }
-    return crc; // No XOR output, no reflection
+    return crc; // No xorout, no reflection
 }
 
-
-static inline uint8_t crc8_dvb_s2_table(uint8_t *data, size_t len)
+static inline uint8_t crc8_dvb_s2_table(const uint8_t *data, size_t len)
 {
     uint8_t crc = 0x00; // Initial value
     for (size_t i = 0; i < len; i++) {
@@ -73,137 +55,221 @@ static inline uint8_t crc8_dvb_s2_table(uint8_t *data, size_t len)
     return crc;
 }
 
+/* -------------------------- Frame builder (TX) -------------------------- */
 
-static inline int crsf_verify_frame(uint8_t *frame, size_t frame_len)
+uint16_t CRSF_CreateFrame(uint8_t *outFrame, uint8_t type,
+                          const uint8_t *payload, uint16_t payloadLen)
 {
-	uint8_t len;
-	uint8_t crc_calc, crc_frame;
-	size_t crc_in_len;
+    if (!outFrame) return 0;
+    if (payloadLen > CRSF_MAX_PAYLOAD_SIZE) return 0;
 
-    if (frame_len < 4) return 0;
-    len = frame[1];
-    if (frame_len != (size_t)(len + 2)) return 0;  // Consistency
-    uint8_t *type_ptr = &frame[2];
-    crc_in_len = (size_t)(len - 1);                // type + payload
-    //crc_calc  = crc8_dvb_s2_bitwise(type_ptr, crc_in_len);
-    crc_calc  = crc8_dvb_s2_table(type_ptr, crc_in_len);
-    crc_frame = frame[frame_len - 1];
+    outFrame[0] = CRSF_SYNC_BYTE_PRIMARY;        /* MUST be 0xC8 when sending */
+    outFrame[1] = (uint8_t)(payloadLen + 2);     /* type + crc */
+    outFrame[2] = type;
 
-    return (crc_calc == crc_frame);
+    for (uint16_t i = 0; i < payloadLen; i++) {
+        outFrame[3 + i] = payload ? payload[i] : 0;
+    }
+
+    /* CRC over [type..payload] */
+    outFrame[3 + payloadLen] = crc8_dvb_s2_table(&outFrame[2], (size_t)(payloadLen + 1));
+
+    /* total length = LEN + 2 */
+    return (uint16_t)(outFrame[1] + 2);
 }
 
+/* ------------------------ RC Packing / Unpacking ------------------------ */
 
-static int is_valid_dest(uint8_t d)
+void CRSF_PackChannels16x11(const uint16_t *ch_ticks, uint8_t *out22)
 {
-    /* FC=0xC8, TX-Modul=0xEE, Radio-Handset=0xEA, RX=0xEC */
-    return (d == 0xC8 || d == 0xEE || d == 0xEA || d == 0xEC);
-}
+    // 16 * 11 bits = 176 bits = 22 bytes
+    for (int i = 0; i < 22; i++) out22[i] = 0;
 
+    for (int ch = 0; ch < 16; ch++) {
+        uint32_t v = (uint32_t)(ch_ticks[ch] & 0x07FFu); // 11-bit
+        uint32_t bitpos     = (uint32_t)(11 * ch);
+        uint32_t byteIndex  = bitpos >> 3;               // start byte
+        uint32_t bitInByte  = bitpos & 0x7u;             // bit offset in start byte (0..7)
 
-static void crsf_unpack_rc16(const uint8_t *payload, size_t payload_len, uint16_t ch[16])
-{
-	// Erwartete Länge für 16*11 Bit: 176 Bit = 22 Bytes
-	if (payload_len < 22) return;  // Konservativ prüfen
+        // Byte 0: lower part, left-shift into start byte
+        out22[byteIndex] |= (uint8_t)(v << bitInByte);
 
-	// Für jede Kanalnummer i: 11-Bit-Wort ab Bitposition (11*i)
-	for (int i = 0; i < 16; i++) {
-		// 11-bit Startposition des Kanals i im Bitstrom
-		const uint32_t bitpos    = 11U * i;
-		const uint32_t byteIndex = bitpos >> 3;   // Byte-Start (bitpos/8)
-		const uint32_t bitInByte = bitpos & 0x7U; // Offset im Startbyte (0...7)
-
-		// 24-Bit Fenster: Hole bis zu 3 Bytes und baue sie little-endian zusammen
-		uint32_t raw32 = 0;
-		// byteIndex ist maximal 21; wir lesen defensiv bis zu 3 Bytes, prüfen die Grenzen
-		for (uint32_t k = 0; k < 3; k++) {
-			size_t idx = (size_t)byteIndex + (size_t)k;
-			if (idx < payload_len) {
-				raw32 |= ((uint32_t)payload[idx]) << (8U * (uint32_t)k);
-			}
-		}
-
-		raw32 >>= bitInByte;                   // Zur Bitposition ausrichten
-		ch[i]   = (uint16_t)(raw32 & 0x07FFU); // 11 Bit extrahieren
-	}
-}
-
-
-static inline uint16_t map_rc_to_us(uint16_t raw)
-{
-	// Begrenzung auf CRSF-typischen Bereich
-	if (raw < 172)  raw =  172;
-	if (raw > 1811) raw = 1811;
-
-	return RC_TO_US(raw);
-}
-
-
-static void crsf_process_valid_frame(const uint8_t *frame, size_t frame_len)
-{
-    /* Frame: [dest][len][type][payload][crc] */
-	if (frame_len < 5) return;
-
-	const uint8_t len  = frame[1];
-	const uint8_t type = frame[2];
-
-	const uint8_t *payload     = &frame[3];         // payload beginnt nach type
-	const size_t   payload_len = (size_t)(len - 2); // len = type + payload + crc
-
-	if (type == 0x16) {  // RC channels packet
-		if (payload_len < 22) return;  // Konservativ prüfen
-
-		uint16_t ch_temp[16] = {0};
-		crsf_unpack_rc16(payload, payload_len, ch_temp);
-
-		// Rohwerte und us für ALLE 16 Kanäle ablegen
-		for (int i = 0; i < 16; i++) {
-			rc_raw[i] = ch_temp[i];
-			rc_us[i]  = map_rc_to_us(ch_temp[i]);
-		}
-	}
-
-	// Andere types ignorieren (bei Bedarf später erweitern)
-}
-
-
-/* ===== Public API ===== */
-void crsf_consume_byte(uint8_t b)
-{
-    switch (crsf_state) {
-    case S_WAIT_DEST:
-        if (is_valid_dest(b)) {
-            crsf_frame[0] = b;
-            crsf_idx = 1;
-            crsf_state = S_WAIT_LEN;
+        // Byte 1: middle part (overflowing bits from byte 0)
+        if (byteIndex + 1 < 22) {
+            out22[byteIndex + 1] |= (uint8_t)(v >> (8u - bitInByte));
         }
-        break;
 
-    case S_WAIT_LEN:
-        crsf_expected_len = b;
-        crsf_frame[crsf_idx++] = b;
-        if (crsf_expected_len < 2) { // mindestens type(1)+crc(1)
-            crsf_state = S_WAIT_DEST;
-            crsf_idx   = 0;
-            break;
+        /* Byte 2: remaining upper part only if the 11-bit field crosses two byte boundaries.
+         * This happens when bitInByte > 5 (because 11 - (8 - bitInByte) > 8) */
+        if (bitInByte > 5 && (byteIndex + 2) < 22) {
+            out22[byteIndex + 2] |= (uint8_t)(v >> (16u - bitInByte));
         }
-        if ((2 + crsf_expected_len) > CRSF_MAX_FRAME_LEN) {
-            crsf_state = S_WAIT_DEST;
-            crsf_idx   = 0;
-            break;
-        }
-        crsf_state = S_READ_BODY;
-        break;
+    }
+}
 
-    case S_READ_BODY:
-        crsf_frame[crsf_idx++] = b;
-        if (crsf_idx == (size_t)(2 + crsf_expected_len)) {
-            /* Vollständiges Frame vorhanden */
-            if (crsf_verify_frame(crsf_frame, crsf_idx)) {
-                crsf_process_valid_frame(crsf_frame, crsf_idx);
+void CRSF_UnpackChannels16x11(const uint8_t *in22, uint16_t *ch_ticks)
+{
+    /* Unpack the 16 * 11-bit fields from 22 bytes */
+    for (int i = 0; i < 16; i++) {
+        const uint32_t bitpos    = (uint32_t)(11 * i);
+        const uint32_t byteIndex = bitpos >> 3;
+        const uint32_t bitInByte = bitpos & 0x7U;
+
+        /* Assemble a 24-bit window (up to 3 bytes), little-endian */
+        uint32_t v = 0;
+        /* Defensive reads */
+        for (uint32_t k = 0; k < 3; k++) {
+            uint32_t idx = byteIndex + k;
+            uint8_t  b   = (idx < 22U) ? in22[idx] : 0;
+            v |= ((uint32_t)b) << (8U * k);
+        }
+        v >>= bitInByte;
+        ch_ticks[i] = (uint16_t)(v & 0x07FFu);
+    }
+}
+
+/* ----------------------------- Parser (RX) ----------------------------- */
+
+static inline int is_valid_sync(uint8_t s)
+{
+    return (s == CRSF_SYNC_BYTE_PRIMARY) ||
+           (s == CRSF_SYNC_BYTE_ALT_TX)  ||
+           (s == CRSF_SYNC_BYTE_ALT_RADIO) ||
+           (s == CRSF_SYNC_BYTE_ALT_RX);
+}
+
+void CRSF_ParserInit(CRSF_Parser_t *p, uint32_t (*get_ms_ts_cb)(void))
+{
+    if (!p) return;
+
+    p->st   = CRSF_PARSE_SYNC;
+    p->idx  = 0;
+    p->len  = 0;
+    p->type = 0;
+
+    for (int i = 0; i < 16; i++) p->rc.ch_ticks[i] = 992; /* Center */
+
+    /* Clear LinkStats (payload fields) */
+    p->linkStats.up_rssi_ant1 = 0;
+    p->linkStats.up_rssi_ant2 = 0;
+    p->linkStats.up_LQ        = 0;
+    p->linkStats.up_SNR       = 0;
+    p->linkStats.diversity    = 0;
+    p->linkStats.rf_mode      = 0;
+    p->linkStats.up_tx_power  = 0;
+    p->linkStats.dn_rssi      = 0;
+    p->linkStats.dn_LQ        = 0;
+    p->linkStats.dn_SNR       = 0;
+
+    /* Internal meta info */
+    p->get_ms_timestamp = get_ms_ts_cb;
+    p->linkstats_last_seen_ms = 0;
+}
+
+static void parse_and_store_frame(CRSF_Parser_t *p, const uint8_t *frame, size_t frame_len)
+{
+    if (!p || frame_len < 5) return;
+    const uint8_t len = frame[1];
+    const uint8_t type = frame[2];
+    const uint8_t *payload = &frame[3];
+    const size_t payload_len = (size_t)(len - 2); /* type + payload + crc = len => payload = len-2 */
+
+    if (type == CRSF_FRAMETYPE_RC_CHANNELS_PACKED) {
+        if (payload_len >= 22) {
+            CRSF_UnpackChannels16x11(payload, p->rc.ch_ticks);
+        }
+    }
+    else if (type == CRSF_FRAMETYPE_LINK_STATISTICS) {
+        if (payload_len >= 10) {
+            p->linkStats.up_rssi_ant1 = payload[0];
+            p->linkStats.up_rssi_ant2 = payload[1];
+            p->linkStats.up_LQ        = payload[2];
+            p->linkStats.up_SNR       = (int8_t)payload[3];
+            p->linkStats.diversity    = payload[4];
+            p->linkStats.rf_mode      = payload[5];
+            p->linkStats.up_tx_power  = payload[6];
+            p->linkStats.dn_rssi      = payload[7];
+            p->linkStats.dn_LQ        = payload[8];
+            p->linkStats.dn_SNR       = (int8_t)payload[9];
+
+            if (p->get_ms_timestamp) {
+                p->linkstats_last_seen_ms = p->get_ms_timestamp();
             }
-            crsf_state = S_WAIT_DEST;
-            crsf_idx   = 0;
         }
+    }
+    /* Add more types when needed */
+}
+
+int CRSF_ParserFeed(CRSF_Parser_t *p, uint8_t byte, uint8_t *o_type)
+{
+    if (!p) return 0;
+
+    switch (p->st)
+    {
+    case CRSF_PARSE_SYNC:
+        if (is_valid_sync(byte)) {
+            p->sync = byte;
+            p->st = CRSF_PARSE_LEN;
+        }
+        break;
+
+    case CRSF_PARSE_LEN:
+        p->len = byte; /* = type + payload + crc */
+        if (p->len < 2 || (uint32_t)p->len + 2U > CRSF_MAX_FRAME_SIZE) {
+            /* invalid, resync */
+            p->st = CRSF_PARSE_SYNC;
+            break;
+        }
+        p->idx  = 0;
+        p->st   = CRSF_PARSE_TYPE_PAYLOAD_CRC;
+        break;
+
+    case CRSF_PARSE_TYPE_PAYLOAD_CRC:
+        /* collect [type..payload..crc] into p->buf[0..len-1] */
+        p->buf[p->idx++] = byte;
+
+        if (p->idx >= p->len) {
+            /* full segment received */
+            const uint8_t *type_ptr = &p->buf[0];
+            const uint8_t rx_crc    = p->buf[p->len - 1];
+            const uint8_t calc_crc  = crc8_dvb_s2_table(type_ptr, (size_t)(p->len - 1));
+
+            if (calc_crc == rx_crc) {
+                /* valid frame -> parse & update outputs */
+                const uint8_t type = p->buf[0];
+                uint8_t frame_local[CRSF_MAX_FRAME_SIZE];
+                /* reconstruct full frame [sync][len][type][payload][crc] for parser */
+                frame_local[0] = p->sync;
+                frame_local[1] = p->len;
+                for (uint8_t i = 0; i < p->len; i++) frame_local[2 + i] = p->buf[i];
+
+                parse_and_store_frame(p, frame_local, (size_t)(p->len + 2));
+
+                if (o_type) *o_type = type;
+
+                /* back SYNC */
+                p->st = CRSF_PARSE_SYNC;
+                return 1; /* valid frame completed */
+            } else {
+                /* CRC error -> resync */
+                p->st = CRSF_PARSE_SYNC;
+            }
+        }
+        break;
+
+    default:
+        p->st = CRSF_PARSE_SYNC;
         break;
     }
+    return 0;
+}
+
+/* ------------------------- Link-alive heuristic ------------------------- */
+
+int CRSF_LinkIsAlive(const CRSF_Parser_t *p, uint32_t now_ms, uint32_t timeout_ms)
+{
+    if (!p) return 0;
+    const uint32_t last = p->linkstats_last_seen_ms;
+    if (last == 0U) return 0;
+    return ((now_ms - last) <= timeout_ms) ? 1 : 0;
 }

@@ -23,7 +23,10 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
+#include "uart_ring.h"  // Ring buffer API: UART_Ring_Init(), UART_Ring_GetByte()
 #include "crsf.h"
+
+#include <stdio.h>  // snprintf
 
 /* USER CODE END Includes */
 
@@ -34,6 +37,10 @@
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
+// Sendezyklus für RC-Frames: 4 ms
+#define CRSF_RC_PERIOD_MS   (4U)
+// 1-Hz Debugausgabe
+#define STATUS_PERIOD_MS    (1000U)
 
 /* USER CODE END PD */
 
@@ -45,10 +52,13 @@
 /* Private variables ---------------------------------------------------------*/
 
 /* USER CODE BEGIN PV */
-uint16_t rcChannels[16] = {
+// Demo: RC-Kanäle in µs (CH1 wippt zwischen 1000 und 1500)
+uint16_t rc_us[16] = {
     1000,1100,1200,1300,1400,1500,1600,1700,
     1800,1900,2000,1111,1122,1133,1144,1155
 };
+
+static CRSF_Parser_t gCrsf;      // Parser-Instanz
 
 /* USER CODE END PV */
 
@@ -60,6 +70,7 @@ void SystemClock_Config(void);
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
+static inline uint32_t app_millis(void) { return HAL_GetTick(); }
 
 /* USER CODE END 0 */
 
@@ -71,6 +82,9 @@ int main(void)
 {
 
   /* USER CODE BEGIN 1 */
+	uint8_t b;
+
+	uint8_t  ls_seen_flag = 0;
 
   /* USER CODE END 1 */
 
@@ -95,12 +109,25 @@ int main(void)
   MX_USART2_UART_Init();
   MX_USART3_UART_Init();
   /* USER CODE BEGIN 2 */
-  int direction = +10;        // +10 = hochzählen, -10 = runterzählen
-  uint32_t lastUpdate = 0;    // für 1-Sekunden-Intervall
-  uint32_t lastFrame = 0;     // für 250 Hz
+  // Ringbuffer für USART3 initialisieren & RX-Interrupt aktivieren
+  UART_Ring_Init(&huart3);
+  __HAL_UART_ENABLE_IT(&huart3, UART_IT_RXNE);  // RX interrupt aktivieren
 
-  uint8_t payload[22];
-  uint8_t frame[32];
+  // CRSF-Parser initialisieren (Zeit-Callback für LinkIsAlive etc.)
+  CRSF_ParserInit(&gCrsf, app_millis);
+
+  // Start im RX-Betrieb (Halbduplex)
+  HAL_HalfDuplex_EnableReceiver(&huart3);
+
+  // Demo-Variablen
+    int      direction     = +10;  // +10 = hochzählen, -10 = runterzählen
+    uint32_t lastUpdate    = 0;    // für 1-Sekunden-Intervall
+    uint32_t lastFrame     = 0;    // für 250 Hz
+    uint32_t last_ls_print = 0;
+
+    // Arbeitsbuffer für TX
+    uint8_t payload[22];
+    uint8_t frame[32];
 
   /* USER CODE END 2 */
 
@@ -110,41 +137,76 @@ int main(void)
   {
 	  uint32_t now = HAL_GetTick();
 
-	  // --- 1) Kanal 1 jede Sekunde ändern ---
-	  if (now - lastUpdate >= 1000)
-	  {
+	  /* --- 1) Demo: CH1 jede Sekunde ändern --------------------------------- */
+	  if (now - lastUpdate >= 1000) {
 		  lastUpdate = now;
-
-	      rcChannels[0] += direction;
-
-	      if (rcChannels[0] >= 1500)
-	      {
-	          rcChannels[0] = 1500;
+		  rc_us[0] += direction;
+	      if (rc_us[0] >= 1500) {
+	    	  rc_us[0] = 1500;
 	          direction = -10;
 	      }
-	      else if (rcChannels[0] <= 1000)
-	      {
-	          rcChannels[0] = 1000;
+	      else if (rc_us[0] <= 1000) {
+	    	  rc_us[0] = 1000;
 	          direction = +10;
 	      }
 	  }
 
-	  // --- 2) CRSF-Frame alle 4 ms senden (250 Hz) ---
-	  if (now - lastFrame >= 4)
-	  {
+	  /* --- 2) RC-Frame alle 4 ms senden (250 Hz) ---------------------------- */
+	  if (now - lastFrame >= CRSF_RC_PERIOD_MS) {
 	      lastFrame = now;
 
-	      //uint8_t payload[22];
-	      //uint8_t frame[32];
+	      // a) µs -> CRSF-Ticks & 22-Byte-Payload packen
+	      uint16_t ticks[16];
+	      for (int i = 0; i < 16; i++) ticks[i] = CRSF_UsToTicks(rc_us[i]);
+	      CRSF_PackChannels16x11(ticks, payload);
 
-	      CRSF_PackChannels(rcChannels, payload);
-	      uint16_t frameLen = CRSF_CreateFrame(frame, CRSF_TYPE_RC_CHANNELS, payload, 22);
+	      // b) Kompletten Frame bauen
+	      uint16_t flen = CRSF_CreateFrame(frame, CRSF_FRAMETYPE_RC_CHANNELS_PACKED, payload, 22);
 
-	      // Enable TX (Half-Duplex Mode)
-	      //HAL_HalfDuplex_EnableTransmitter(&huart3);
+	      // c) Senden im Half-Duplex
+	      HAL_HalfDuplex_EnableTransmitter(&huart3);
+	      HAL_UART_Transmit(&huart3, frame, flen, 2);
 
-	      HAL_UART_Transmit(&huart3, frame, frameLen, 2);
+	      // WICHTIG: Auf TC warten (inkl. Stop-Bit), erst dann auf RX schalten
+	      while (__HAL_UART_GET_FLAG(&huart3, UART_FLAG_TC) == RESET) { /* warten */ }
+	      HAL_HalfDuplex_EnableReceiver(&huart3);
+	      // Ab hier sammelt die ISR (UART_Ring_IRQ_Handler) eingehende Bytes
 	  }
+
+	  /* --- 3) Eingehende Bytes -> Parser (Ringbuffer leeren) ---------------- */
+	  while (UART_Ring_GetByte(&b)) {
+		  uint8_t ftype;
+		  if (CRSF_ParserFeed(&gCrsf, b, &ftype)) {
+			  if (ftype == CRSF_FRAMETYPE_LINK_STATISTICS) {
+				  ls_seen_flag = 1;   // Signal, dass neue Link-Stats angekommen sind
+	          }
+	      }
+	  }
+
+	  if (now - last_ls_print >= 1000U) {
+		  last_ls_print = now;
+
+		  if (ls_seen_flag) {
+			  ls_seen_flag = 0;  // zurücksetzen, damit wir nur einmal pro Sekunde drucken
+
+			  // Wir lesen die LQ direkt aus dem Parserzustand:
+			  uint8_t up   = gCrsf.linkStats.up_LQ;
+			  uint8_t pidx = gCrsf.linkStats.up_tx_power;
+
+			  char line[80];
+			  int n = snprintf(line, sizeof(line),
+					  "Link Quality: up=%u%%, up_tx_power(idx)=%u\r\n", up, pidx);
+
+			  if (n > 0) {
+				  uint16_t len = (n < (int)sizeof(line)) ? (uint16_t)n : (uint16_t)(sizeof(line)-1);
+				  HAL_UART_Transmit(&huart2, (uint8_t*)line, len, 20);
+			  }
+		  } else {
+			  const char no[] = "No Link Statistics in last second\r\n";
+			  HAL_UART_Transmit(&huart2, (uint8_t*)no, sizeof(no) - 1, 20);
+		  }
+	  }
+
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */

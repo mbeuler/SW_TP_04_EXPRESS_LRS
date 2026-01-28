@@ -23,8 +23,10 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-#include "uart_ring.h"
+#include "uart_ring.h"  // Ring buffer API: UART_Ring_Init(), UART_Ring_GetByte()
 #include "crsf.h"
+
+#include <stdio.h>  // snprintf
 
 /* USER CODE END Includes */
 
@@ -35,6 +37,7 @@
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
+#define PRINT_LINK_STATUS  1
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -47,8 +50,7 @@
 /* USER CODE BEGIN PV */
 volatile uint8_t led_enabled = 0;
 
-// Einzelbyte-Puffer fuer Interrupt-Empfang (USART3)
-static uint8_t uart3_rx_byte = 0;
+static CRSF_Parser_t gCrsf;      // Parser-Instanz
 
 /* USER CODE END PV */
 
@@ -61,35 +63,33 @@ static void MPU_Config(void);
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
+static inline uint32_t app_millis(void) { return HAL_GetTick(); }
 
-int format_channels(char *msg, int n)
+// formatiert n Kanäle (µs) aus dem Parser in eine Textzeile "xxxx xxxx ...\r\n"
+static int format_channels_us(char *msg, int n, const CRSF_Parser_t* p)      /*-- Änderung --*/
 {
-	int pos = 0;
+    int pos = 0;
+    for (int i = 0; i < n; i++) {
+        int32_t v = CRSF_TicksToUs(p->rc.ch_ticks[i]);
+        // Tausenderstelle
+        if (v >= 1000) msg[pos++] = '0' + (v / 1000);
+        else           msg[pos++] = ' ';
+        // Hunderterstelle
+        if (v >= 100)  msg[pos++] = '0' + ((v / 100) % 10);
+        else           msg[pos++] = ' ';
+        // Zehnerstelle
+        if (v >= 10)   msg[pos++] = '0' + ((v / 10) % 10);
+        else           msg[pos++] = ' ';
+        // Einerstelle
+        msg[pos++] = '0' + (v % 10);
 
-	for (int i = 0; i < n; i++) {
-		uint16_t v = rc_us[i];
-		// Tausenderstelle
-		if (v >= 1000) msg[pos++] = '0' + (v / 1000);
-		else           msg[pos++] = ' ';
-		// Hunderterstelle
-		if (v >= 100)  msg[pos++] = '0' + ((v / 100) % 10);
-		else           msg[pos++] = ' ';
-		// Zehnerstelle
-		if (v >= 10)   msg[pos++] = '0' + ((v / 10) % 10);
-		else           msg[pos++] = ' ';
-		// Einerstelle
-		msg[pos++] = '0' + (v % 10);
-
-		// Trennzeichen (außer nach letztem Kanal)
-		if (i < n - 1) msg[pos++] = ' ';
-	}
-
-	// Zeilenende
-	msg[pos++] = '\r';
-	msg[pos++] = '\n';
-	msg[pos]   = '\0'; // String-Ende
-
-	return pos;
+        // Trennzeichen (außer nach letztem Kanal)
+        if (i < n - 1) msg[pos++] = ' ';
+    }
+    msg[pos++] = '\r';
+    msg[pos++] = '\n';
+    msg[pos] = '\0';
+    return pos;
 }
 
 /* USER CODE END 0 */
@@ -105,7 +105,10 @@ int main(void)
 	uint8_t b;
 	uint32_t last_print_ms = 0;
 
-	char msg[64];
+	uint8_t  ls_seen_flag = 0;
+	uint32_t last_ls_print = 0;
+
+	char msg[128];
 
   /* USER CODE END 1 */
 
@@ -150,17 +153,64 @@ int main(void)
 
   while (1)
   {
+//	  while (UART_Ring_GetByte(&b)) {
+//		  crsf_consume_byte(b);
+//	  }
+
+	  // Eingehende Bytes vom Ringbuffer in den Parser füttern
 	  while (UART_Ring_GetByte(&b)) {
-		  crsf_consume_byte(b);
+		  uint8_t ftype;
+		  if (CRSF_ParserFeed(&gCrsf, b, &ftype)) {
+			  // Link Statistics message
+			  if (ftype == CRSF_FRAMETYPE_LINK_STATISTICS) {
+				  ls_seen_flag = 1; // Nur Flag setzen, KEIN sofortiger Print
+				  //const char msg[] = "Link Statistics packet received\r\n";
+				  //HAL_UART_Transmit(&huart2, (uint8_t*)msg, sizeof(msg) - 1, 20);
+			  }
+
+			  // optional: auf RC/LinkStats reagieren
+			  // if (ftype == CRSF_FRAMETYPE_RC_CHANNELS_PACKED) { ... }
+			  // if (ftype == CRSF_FRAMETYPE_LINK_STATISTICS)   { ... }
+		  }
 	  }
 
-	  // Alle 100ms Kanalwerte in us ausgeben
-	  if (HAL_GetTick() - last_print_ms >= 100) {
-		  last_print_ms = HAL_GetTick();
+	  // Alle 100 ms: 8 RC-Kanäle in µs ausgeben
+	  uint32_t now = HAL_GetTick();
+	  if (now - last_print_ms >= 100) {
+		  last_print_ms = now;
+		  int k = format_channels_us(msg, 8, &gCrsf);
+		  HAL_UART_Transmit(&huart2, (uint8_t*)msg, (uint16_t)k, 50);
+	  }
 
-		  int k = format_channels(msg, 8); // 8 Kanalwerte
+	  if (now - last_ls_print >= 1000) {
+		  last_ls_print = now;
 
-		  HAL_UART_Transmit(&huart2, (uint8_t*)msg, k, 50);
+		  if (ls_seen_flag) {
+			  ls_seen_flag = 0; // Flag zuruecksetzen, damit wir nur einmal pro Sekunde drucken
+
+			  // Wir lesen die LQ direkt aus dem Parserzustand:
+			  // up_LQ = Uplink Link Quality in %, dn_LQ = Downlink Link Quality in %
+			  uint8_t up   = gCrsf.linkStats.up_LQ;
+			  uint8_t dn   = gCrsf.linkStats.dn_LQ;
+			  uint8_t pidx = gCrsf.linkStats.up_tx_power;
+
+			  // Puffer vorbereiten und snprintf verwenden
+			  char line[80];
+			  int n = snprintf(line, sizeof(line),
+					  "Link Quality: up=%u%%, down=%u%%, up_tx_power(idx)=%u\r\n", up, dn, pidx);
+
+			  if (n > 0) {
+				  // Achtung: n kann >= sizeof(line) sein; wir senden max. Puffergroesse-1
+				  uint16_t txlen = (n < (int)sizeof(line)) ? (uint16_t)n : (uint16_t)(sizeof(line) - 1);
+				  HAL_UART_Transmit(&huart2, (uint8_t*)line, txlen, 20);
+			  }
+
+			  //const char txt1[] = "Link Statistics packet received\r\n";
+			  //HAL_UART_Transmit(&huart2, (uint8_t*)txt1, sizeof(txt1) - 1, 20);
+		  } else {
+			  const char txt2[] = "No Link Statistics in last second\r\n";
+			  HAL_UART_Transmit(&huart2, (uint8_t*)txt2, sizeof(txt2) - 1, 20);
+		  }
 	  }
     /* USER CODE END WHILE */
 
