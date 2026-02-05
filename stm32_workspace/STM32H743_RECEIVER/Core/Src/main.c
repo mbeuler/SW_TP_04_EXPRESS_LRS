@@ -95,8 +95,13 @@ static int format_channels_us(char *msg, int n, const CRSF_Parser_t* p)      /*-
 // ---- H743: Dummy-GPS über CRSF 0x02 zum ELRS-Receiver senden ----
 static void H743_SendGpsDummy(UART_HandleTypeDef *huart)
 {
+	static int32_t lat_val = 487000000; // // 48.7000000° (Startwert)
     CRSF_GPS_t payload;
-    payload.latitude    = 487000000;  // 48.7000000°
+
+    // Latitude anpassen (pro Aufruf +1)
+    payload.latitude = lat_val++;
+
+    // Restliche Felder statisch lassen
     payload.longitude   =  91000000;  // 9.1000000°
     payload.groundspeed = 3650;       // 36.50 km/h
     payload.heading     = 12345;      // 123.45°
