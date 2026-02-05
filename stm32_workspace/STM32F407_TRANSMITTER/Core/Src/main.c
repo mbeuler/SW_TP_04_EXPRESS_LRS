@@ -192,11 +192,12 @@ int main(void)
 
 			  // Wir lesen die LQ direkt aus dem Parserzustand:
 			  uint8_t up   = gCrsf.linkStats.up_LQ;
+			  uint8_t dn   = gCrsf.linkStats.dn_LQ;
 			  uint8_t pidx = gCrsf.linkStats.up_tx_power;
 
 			  char line[80];
 			  int n = snprintf(line, sizeof(line),
-					  "Link Quality: up=%u%%, up_tx_power(idx)=%u\r\n", up, pidx);
+					  "Link Quality: up=%u%%, down=%u%%, up_tx_power(idx)=%u\r\n", up, dn, pidx);
 
 			  if (n > 0) {
 				  uint16_t len = (n < (int)sizeof(line)) ? (uint16_t)n : (uint16_t)(sizeof(line)-1);
@@ -208,7 +209,7 @@ int main(void)
 		  }
 	  }
 
-	  if (now - last_gps_print >= 500U) {
+	  if (now - last_gps_print >= 1000U) {
 		  last_gps_print = now;
 
 		  // Einfache Plausibilitätsprüfung:
