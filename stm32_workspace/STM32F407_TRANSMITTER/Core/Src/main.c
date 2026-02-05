@@ -120,10 +120,11 @@ int main(void)
   HAL_HalfDuplex_EnableReceiver(&huart3);
 
   // Demo-Variablen
-    int      direction     = +10;  // +10 = hochzählen, -10 = runterzählen
-    uint32_t lastUpdate    = 0;    // für 1-Sekunden-Intervall
-    uint32_t lastFrame     = 0;    // für 250 Hz
-    uint32_t last_ls_print = 0;
+    int      direction      = +10;  // +10 = hochzählen, -10 = runterzählen
+    uint32_t lastUpdate     = 0;    // für 1-Sekunden-Intervall
+    uint32_t lastFrame      = 0;    // für 250 Hz
+    uint32_t last_ls_print  = 0;
+    uint32_t last_gps_print = 0;
 
     // Arbeitsbuffer für TX
     uint8_t payload[22];
@@ -204,6 +205,30 @@ int main(void)
 		  } else {
 			  const char no[] = "No Link Statistics in last second\r\n";
 			  HAL_UART_Transmit(&huart2, (uint8_t*)no, sizeof(no) - 1, 20);
+		  }
+	  }
+
+	  if (now - last_gps_print >= 500U) {
+		  last_gps_print = now;
+
+		  // Einfache Plausibilitätsprüfung:
+		  if (gCrsf.gps.latitude != 0 || gCrsf.gps.longitude != 0) {
+			  char line[128];
+			  //int alt_m = (int)gCrsf.gps.altitude - 1000; // Offset -1000m zurückrechnen
+			  int n = snprintf(line, sizeof(line),
+			      "GPS RAW: lat=%ld lon=%ld gs=%u hdg=%u alt=%u sats=%u\r\n",
+			      (long)gCrsf.gps.latitude,
+			      (long)gCrsf.gps.longitude,
+			      (unsigned)gCrsf.gps.groundspeed,
+			      (unsigned)gCrsf.gps.heading,
+			      (unsigned)gCrsf.gps.altitude,
+			      (unsigned)gCrsf.gps.satellites
+			  );
+
+			  if (n > 0) {
+				  uint16_t txlen = (n < (int)sizeof(line)) ? (uint16_t)n : (uint16_t)(sizeof(line)-1);
+				  HAL_UART_Transmit(&huart2, (uint8_t*)line, txlen, 20);
+			  }
 		  }
 	  }
 
