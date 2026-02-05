@@ -92,6 +92,24 @@ static int format_channels_us(char *msg, int n, const CRSF_Parser_t* p)      /*-
     return pos;
 }
 
+// ---- H743: Dummy-GPS über CRSF 0x02 zum ELRS-Receiver senden ----
+static void H743_SendGpsDummy(UART_HandleTypeDef *huart)
+{
+    CRSF_GPS_t payload;
+    payload.latitude    = 487000000;  // 48.7000000°
+    payload.longitude   =  91000000;  // 9.1000000°
+    payload.groundspeed = 3650;       // 36.50 km/h
+    payload.heading     = 12345;      // 123.45°
+    payload.altitude    = (uint16_t)(450 + 1000); // 450 m MSL -> +1000 Offset => 1450
+    payload.satellites  = 17;
+
+    uint8_t frame[32];
+    uint16_t flen = CRSF_CreateFrame(frame, 0x02, (const uint8_t*)&payload, sizeof(payload));
+
+    // UART: Full-Duplex, non-inverted, 420000 baud
+    HAL_UART_Transmit(huart, frame, flen, 5);
+}
+
 /* USER CODE END 0 */
 
 /**
@@ -107,6 +125,7 @@ int main(void)
 
 	uint8_t  ls_seen_flag = 0;
 	uint32_t last_ls_print = 0;
+	uint32_t last_gps_tx = 0;
 
 	char msg[128];
 
@@ -153,10 +172,6 @@ int main(void)
 
   while (1)
   {
-//	  while (UART_Ring_GetByte(&b)) {
-//		  crsf_consume_byte(b);
-//	  }
-
 	  // Eingehende Bytes vom Ringbuffer in den Parser füttern
 	  while (UART_Ring_GetByte(&b)) {
 		  uint8_t ftype;
@@ -212,6 +227,12 @@ int main(void)
 			  HAL_UART_Transmit(&huart2, (uint8_t*)txt2, sizeof(txt2) - 1, 20);
 		  }
 	  }
+
+	  if (now - last_gps_tx >= 200U) { // 5 Hz
+	      last_gps_tx = now;
+	      H743_SendGpsDummy(&huart3);   // huart3 = ELRS-Receiver-UART
+	  }
+
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
