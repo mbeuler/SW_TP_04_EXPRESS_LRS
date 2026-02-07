@@ -63,6 +63,9 @@ uint16_t rc_us[16] = {
 
 static CRSF_Parser_t gCrsf;      // Parser-Instanz
 
+// Global buffer for processed joystick data
+volatile JoystickData_t g_joystickData;
+
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -78,8 +81,22 @@ void MX_USB_HOST_Process(void);
 static inline uint32_t app_millis(void) { return HAL_GetTick(); }
 
 void USBH_HID_EventCallback(USBH_HandleTypeDef *phost) {
-    uint8_t ui8Debug = 0; // Set breakpoint here to check if the function is called
-    (void)ui8Debug;
+    HID_HandleTypeDef *HID_Handle = (HID_HandleTypeDef *)phost->pActiveClass->pData;
+    uint8_t *current = HID_Handle->pData;
+
+    // Only process new reports (compare first 8 bytes)
+    static uint8_t last_report[JOYSTICK_REPORT_EFFECTIVE_SIZE];
+
+    if (memcmp(current, last_report, JOYSTICK_REPORT_EFFECTIVE_SIZE) != 0) {
+        memcpy(last_report, current, JOYSTICK_REPORT_EFFECTIVE_SIZE);
+
+        JoystickData_t data = USBH_HID_GetJoystickData(current);
+
+        // Atomically update the global buffer
+        __disable_irq();
+        g_joystickData = data;
+        __enable_irq();
+    }
 }
 
 /* USER CODE END 0 */
