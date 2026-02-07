@@ -186,8 +186,12 @@ static USBH_StatusTypeDef USBH_HID_InterfaceInit(USBH_HandleTypeDef *phost)
   }
   else
   {
-    USBH_UsrLog("Protocol not supported.");
-    return USBH_FAIL;
+    //USBH_UsrLog("Protocol not supported.");
+    //return USBH_FAIL;
+	USBH_UsrLog("Unknown HID device (e.g. Joystick) found!"); // HID patch
+	HID_Handle->HIDType = HID_UNKNOWN;
+	HID_Handle->Init = USBH_HID_JoystickInit; // Init function for joystick
+	// Important: Initialization will not be aborted!
   }
 
   HID_Handle->state     = USBH_HID_INIT;
