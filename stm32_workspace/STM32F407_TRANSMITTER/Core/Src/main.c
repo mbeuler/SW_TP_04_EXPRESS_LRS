@@ -27,6 +27,7 @@
 #include "uart_ring.h"  // Ring buffer API: UART_Ring_Init(), UART_Ring_GetByte()
 #include "crsf.h"
 #include "usbh_hid.h"
+#include "usbh_hid_joystick.h"
 
 #include <stdio.h>  // snprintf
 
