@@ -77,6 +77,11 @@ void MX_USB_HOST_Process(void);
 /* USER CODE BEGIN 0 */
 static inline uint32_t app_millis(void) { return HAL_GetTick(); }
 
+void USBH_HID_EventCallback(USBH_HandleTypeDef *phost) {
+    uint8_t ui8Debug = 0; // Set breakpoint here to check if the function is called
+    (void)ui8Debug;
+}
+
 /* USER CODE END 0 */
 
 /**

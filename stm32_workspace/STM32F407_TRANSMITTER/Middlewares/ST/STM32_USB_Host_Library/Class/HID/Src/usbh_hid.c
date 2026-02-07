@@ -384,6 +384,16 @@ static USBH_StatusTypeDef USBH_HID_Process(USBH_HandleTypeDef *phost)
   HID_HandleTypeDef *HID_Handle = (HID_HandleTypeDef *) phost->pActiveClass->pData;
   uint32_t XferSize;
 
+  uint8_t ui8Debug_Array[8], ui8Debug;
+
+  for (int i = 0; i < 8; i++) {
+      ui8Debug_Array[i] = HID_Handle->pData[i];
+  }
+
+  ui8Debug = 0;         // Set breakpoint here (Debugger: look also at HID_Handle->state)
+  (void)ui8Debug_Array; // Avoid compiler warning
+  (void)ui8Debug;       // Avoid compiler warning
+
   switch (HID_Handle->state)
   {
     case USBH_HID_INIT:
