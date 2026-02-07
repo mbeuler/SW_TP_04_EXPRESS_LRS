@@ -106,6 +106,7 @@ static void USBH_HID_ParseHIDDesc(HID_DescTypeDef *desc, uint8_t *buf);
 
 extern USBH_StatusTypeDef USBH_HID_MouseInit(USBH_HandleTypeDef *phost);
 extern USBH_StatusTypeDef USBH_HID_KeybdInit(USBH_HandleTypeDef *phost);
+extern USBH_StatusTypeDef USBH_HID_JoystickInit(USBH_HandleTypeDef *phost); // HID patch
 
 USBH_ClassTypeDef  HID_Class =
 {
