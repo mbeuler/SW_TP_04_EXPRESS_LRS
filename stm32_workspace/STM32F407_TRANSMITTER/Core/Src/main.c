@@ -55,12 +55,6 @@
 /* Private variables ---------------------------------------------------------*/
 
 /* USER CODE BEGIN PV */
-// Demo: RC-Kanäle in µs (CH1 wippt zwischen 1000 und 1500)
-uint16_t rc_us[16] = {
-    1000,1100,1200,1300,1400,1500,1600,1700,
-    1800,1900,2000,1111,1122,1133,1144,1155
-};
-
 static CRSF_Parser_t gCrsf;      // Parser-Instanz
 
 // Global buffer for processed joystick data
@@ -97,6 +91,16 @@ void USBH_HID_EventCallback(USBH_HandleTypeDef *phost) {
         g_joystickData = data;
         __enable_irq();
     }
+}
+
+static inline uint16_t axis16_to_us(uint16_t raw)
+{
+  int32_t v = (int32_t)raw - 32768;         // signed Offset um Center
+  // Skaliere auf ±500µs um 1500 µs (linear, integer)
+  int32_t us = 1500 + (v * 1000) / 65535;   // ≈ 1500 ±500
+  if (us < 1000) us = 1000;
+  if (us > 2000) us = 2000;
+  return (uint16_t)us;
 }
 
 /* USER CODE END 0 */
@@ -149,16 +153,13 @@ int main(void)
   // Start im RX-Betrieb (Halbduplex)
   HAL_HalfDuplex_EnableReceiver(&huart3);
 
-  // Demo-Variablen
-    int      direction      = +10;  // +10 = hochzählen, -10 = runterzählen
-    uint32_t lastUpdate     = 0;    // für 1-Sekunden-Intervall
-    uint32_t lastFrame      = 0;    // für 250 Hz
-    uint32_t last_ls_print  = 0;
-    uint32_t last_gps_print = 0;
+  uint32_t lastFrame      = 0;    // für 250 Hz
+  uint32_t last_ls_print  = 0;
+  uint32_t last_gps_print = 0;
 
-    // Arbeitsbuffer für TX
-    uint8_t payload[22];
-    uint8_t frame[32];
+  // Arbeitsbuffer für TX
+  uint8_t payload[22];
+  uint8_t frame[32];
 
   /* USER CODE END 2 */
 
@@ -168,30 +169,27 @@ int main(void)
   {
 	  uint32_t now = HAL_GetTick();
 
-	  /* --- 1) Demo: CH1 jede Sekunde ändern --------------------------------- */
-	  if (now - lastUpdate >= 1000) {
-		  lastUpdate = now;
-		  rc_us[0] += direction;
-	      if (rc_us[0] >= 1500) {
-	    	  rc_us[0] = 1500;
-	          direction = -10;
-	      }
-	      else if (rc_us[0] <= 1000) {
-	    	  rc_us[0] = 1000;
-	          direction = +10;
-	      }
-	  }
-
-	  /* --- 2) RC-Frame alle 4 ms senden (250 Hz) ---------------------------- */
+	  /* --- 1) RC-Frame alle 4 ms senden (250 Hz) ---------------------------- */
 	  if (now - lastFrame >= CRSF_RC_PERIOD_MS) {
 	      lastFrame = now;
 
-	      // a) µs -> CRSF-Ticks & 22-Byte-Payload packen
+	      // a) Joystick -> RC-us
+	      JoystickData_t js;
+	      __disable_irq();
+	      js = g_joystickData;  // Atomare Kopie (ISR-sicher)
+	      __enable_irq();
+
+	      uint16_t rc_us[16];
+	      rc_us[0] = axis16_to_us(js.x);  // CH1: X
+	      rc_us[1] = axis16_to_us(js.y);  // CH2: Y
+	      for (int i = 2; i < 16; i++) rc_us[i] = 1500;  // Platzhalter
+
+	      // b) us -> CRSF-Ticks & 22-Byte-Payload packen
 	      uint16_t ticks[16];
 	      for (int i = 0; i < 16; i++) ticks[i] = CRSF_UsToTicks(rc_us[i]);
 	      CRSF_PackChannels16x11(ticks, payload);
 
-	      // b) Kompletten Frame bauen
+	      // c) Kompletten Frame bauen
 	      uint16_t flen = CRSF_CreateFrame(frame, CRSF_FRAMETYPE_RC_CHANNELS_PACKED, payload, 22);
 
 	      // c) Senden im Half-Duplex
@@ -204,7 +202,7 @@ int main(void)
 	      // Ab hier sammelt die ISR (UART_Ring_IRQ_Handler) eingehende Bytes
 	  }
 
-	  /* --- 3) Eingehende Bytes -> Parser (Ringbuffer leeren) ---------------- */
+	  /* --- 2) Eingehende Bytes -> Parser (Ringbuffer leeren) ---------------- */
 	  while (UART_Ring_GetByte(&b)) {
 		  uint8_t ftype;
 		  if (CRSF_ParserFeed(&gCrsf, b, &ftype)) {
